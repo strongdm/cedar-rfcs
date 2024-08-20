@@ -253,8 +253,6 @@ permit(
 };
 ```
 
-We must provide the `currentDate` as we can't truncate `currentTime` to eliminate the time component. 
-
 **Forbid access to EU resources after Brexit**
 
 ```cedar
