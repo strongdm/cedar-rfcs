@@ -41,7 +41,7 @@ Here are some of the applications we've seen that have prompted requests for thi
 - Apply certain rules after some day in future. For instance, say that some new legislation is going into effect at that date.
 - Check whether an action is occurring is in certain time frame, like during working hours (Monday - Friday, 9am - 5pm).
 
-Previously for these types of applications, our suggestion has been to use Unix timestamps (see Alt. A) or to pass the result of time computations in the context (see Alt. B).
+Previously for these types of applications, our suggestion has been to use [Unix time](https://en.wikipedia.org/wiki/Unix_time) (see Alt. A) or to pass the result of time computations in the context (see Alt. B).
 But these are not ideal solutions because Cedar policies are intended to _expressive_,  _readable_, and _auditable_.
 Unix timestamps fail the readability criteria: an expression like `context.now < 1723000000` is difficult to read and understand without additional tooling to decode the timestamp.
 Unix timestamps are also indistinguishable from any other integral value providing no additional help in expressing the abstraction of time.
@@ -49,6 +49,8 @@ Passing in pre-computed values in the context (e.g., a field like `context.isWor
 It is also difficult for the calling application to predict the necessary pre-computed values that a policy writer requires for their intended purpose. These may change over time, and may also differ depending on the principal, action, and/or resource.
 
 ### Additional examples
+
+Using an idealized API, the following examples are targeted for this RFC.
 
 **Only allow user "alice" to view JPEG photos for one week after creation.**
 
@@ -72,8 +74,8 @@ permit(
   resource
 ) when {
   context.srcIp.isInRange(ip("192.168.1.0/24")) &&
-  9 <= context.currentTime.hours() &&
-  context.currentTime.hours() < 18
+  9 <= context.currentTime.hour() &&
+  context.currentTime.hour() < 18
 };
 ```
 
@@ -86,8 +88,8 @@ permit(
   resource
 ) when {
   context.srcIp.isInRange(ip("192.168.1.0/24")) &&
-  9 <= context.currentTime.offset(principal.tzOffset).hours() &&
-  context.currentTime.offset(principal.tzOffset).hours() < 18
+  9 <= context.currentTime.offset(principal.tzOffset).hour() &&
+  context.currentTime.offset(principal.tzOffset).hour() < 18
 };
 ```
 
@@ -111,10 +113,7 @@ permit(
   action == Action::"redeem",
   resource is Prize
 ) when {
-  principal.birthDate.day() == 29 &&
-  principal.birthDate.month() == 2 &&
-  context.currentTime.day() == 29 && 
-  context.currentTime.month() == 2
+  principal.birthDate.format("MMDD") == context.currenTime.format("MMDD")
 };
 ```
 
@@ -132,76 +131,151 @@ forbid(
 }
 ```
 
-
 ## Detailed design
 
-This RFC proposes supporting two new extension types: `datetime`, which represents a particular instant of time, up to second accuracy, and `duration` which represents a duration of time.
+This RFC proposes supporting two new extension types: `datetime`, which represents a particular instant of time, up to millisecond accuracy, and `duration` which represents a duration of time.
 To construct and manipulate these types we will provide the functions listed below.
-All of this functionality will be hidden behind a `datetime` feature flag (analogously to the current decimal and IP extensions), allowing users to opt-out if they do not want this functionality.
+All of this functionality will be hidden behind a `datetime` feature flag (analogous to the current decimal and IP extensions), allowing users to opt-out if they do not want this functionality.
+The proposed types will not allow Cedar to support all possible date / time use cases. For example, it would be difficult to model `isLeapYear` in SMT, which makes it hard to support `datetime.dayOfWeek()`, `datetime.dayOfMonth()` or `datetime.year()`. Cedar applications that wish to define policy based on these ideas should pass pre-computed properties through entities, or through `context`.
 
-- `datetime(s)` constructs a datetime object. Like with our other constructors, strict validation requires `s` to be a string literal, although evaluation/authorization support any string-typed expression. The string must have the form `"YYYY-MM-DDThh:mm:ssZ"` (UTC), or `"YYYY-MM-DDThh:mm:ss(+/-)hhmm"` (with Time Zone Offset).
-  - This format is a subset of ISO 8601.
-  - Internally, the returned `datetime` is always stored as UTC.
-- `d.offset(du)` returns a new date with time offset by duration `du`.
-  - This allows for a "lightweight" implementation of local time.
-- `d.isBetween(d1, d2)` checks whether date `d` is between dates `d1` and `d2` (inclusive).
-- `d.isBefore(d1)` checks whether date `d` is before date `d1` (non-inclusive).
-- `d.since(d1)` computes the difference between two `datetime` objects and returns a `duration` object.
-- `d.year()`, `d.month()`, `d.day()`, `d.hour()`, `d.minute()`, `d.second()` returns the relevant component of the date.
-- `d.dayOfWeek()` returns 1 when the day is Sunday, and 7 when the day is Saturday.
+- `datetime(string)` constructs a datetime value. Like with our other constructors, strict validation requires `string` to be a string literal, although evaluation/authorization support any string-typed expression. The string must be of one of the forms, and regardless of the timezone offset is always normalized to UTC: 
+  - `"YYYY-MM-DDThh:mm:ssZ"` (UTC)
+  - `"YYYY-MM-DDThh:mm:ss.SSSZ"` (UTC with millisecond precision)
+  - `"YYYY-MM-DDThh:mm:ss(+/-)hhmm"` (With timezone offset in hours and minutes)
+  - `"YYYY-MM-DDThh:mm:ss.SSS(+/-)hhmm"` (With timezone offset in hours and minutes and millisecond precision)
+- `.add(duration)` returns a new `datetime`, offset by duration.
+- `.toDate()` returns a new `datetime`, truncating to the day, such that printing the `datetime` would have `00:00:00` as the time.
+- `.toTime()` returns a new `duration`, removing the days, such that only milliseconds since `.toDate()` are left. This is equivalent to `DT - DT.toDate()`
 
-Internally, the datetime object will have a structure such as:
+Values of type `datetime` can be used with comparison operators:
 
-```cedarschema
-{
-  year: long,
-  month: long,
-  day: long,
-  hours: long,
-  minutes: long,
-  seconds: long,
-}
+- `DT1 < DT2` returns `true` when `DT1` is before `DT2`
+- `DT1 <= DT2` returns `true` when `DT1` is before or equal to `DT2`
+- `DT1 > DT2` returns `true` when `DT1` is after `DT2`
+- `DT1 >= DT2` returns `true` when `DT1` is after or equal to `DT2`
+- `DT1 == DT2` returns `true` when `DT1` is equal to `DT2`
+
+Values of type `datetime` can also be used with the `-` operator::
+
+- `DT1 - DT2` returns the difference between `DT1` and `DT2` as a `duration`.
+
+Note that `.add(duration)` is the inverse of `-`, not `+`. 
+
+The `datetime` type is internally represented as a `long` and contains a Unix Time in milliseconds. This is the number of non-leap seconds that have passed since `1970-01-01T00:00:00Z` in milliseconds. Unix Time days are always 86,400 seconds and handle leap seconds by absorbing them at the start of the day. Due to using Unix Time, and not providing a "current time" function, Cedar avoids the complexities of leap second handling, pushing them to the system and application.
+
+- `duration(long, string)` constructs a duration value. The string argument must be one of `"days", "hours", "minutes", "seconds", "milliseconds"`. Strict validation requires `string` to be a string literal, although evaluation/authorization support any string-typed expression. 
+- `.toMillis()` returns a `long` describing the number of milliseconds in this duration. (the value as a long, itself)
+- `.toSeconds()` returns a `long` describing the number of seconds in this duration. (`.toMillis() / 1000`)
+- `.toMinutes()` returns a `long` describing the number of minutes in this duration. (`.toSeconds() / 60`)
+- `.toHours()` returns a `long` describing the number of hours in this duration. (`.toMinutes() / 60`)
+- `.toDays()` returns a `long` describing the number of days in this duration. (`.toHours() / 24`)
+
+Values with type `duration` duration can also be used with comparison operators:
+
+- `DT1 < DT2` returns `true` when `DT1` is before `DT2`
+- `DT1 <= DT2` returns `true` when `DT1` is before or equal to `DT2`
+- `DT1 > DT2` returns `true` when `DT1` is after `DT2`
+- `DT1 >= DT2` returns `true` when `DT1` is after or equal to `DT2`
+- `DT1 == DT2` returns `true` when `DT1` is equal to `DT2`
+
+
+With this API in mind, we can express our examples from above:
+
+
+**Only allow experienced, tenured persons from the Hardware Engineering department to see prototypes.**
+
+```cedar
+permit(
+  principal is User,
+  action == Action::"view",
+  resource in Folder::"device_prototypes"
+)
+when {
+  principal.department == "HardwareEngineering" &&
+  principal.jobLevel >= 10 &&
+  (context.now.timestamp - principal.hireDate) > duration(365, "days")
+};
 ```
 
-The datetime parsing function will be responsible for ensuring validity of the structure (e.g., that `month` is between 1 and 12, see below for full details).
+**Only allow user "alice" to view JPEG photos after after creation.**
 
-The `d.since(d1)` function returns a `duration` object.
-
-- `duration(n, unit)` returns a `duration` object. Strict validation requires `unit` to be a string literal of one of the following values: "seconds", "minutes", "hours", "days".
-- `du.toSeconds()`, `du.toMinutes()`, `du.toHours()`, `du.toDays()` returns a `long` indicating the number of units represented by this duration, truncated as appropriate. _e.g._
-  - A `duration` representing 119 seconds, returns `1` when `toMinutes()` is called.
-  - A `duration` representing 10 minutes, returns `0` when `toHours()` is called.
-
-Internally, the `duration` object is a tagged `long` representing seconds. As a record:
-
-```cedarschema
-{
-  seconds: long,
-}
+```cedar
+permit(
+  principal == User::"alice",
+  action == PhotoOp::"view",
+  resource is Photo
+) when {
+  resource.fileType == "JPEG" &&
+  (context.now.timestamp - resource.creationTime) <= duration(7, "days")
+};
 ```
 
-### Constraints on dates
+**Allow access from a certain IP address only between 9am and 6pm UTC.**
 
-Here are the full validity constraints on datetime values:
+```cedar
+permit(
+  principal,
+  action == Action::"access",
+  resource
+) when {
+  context.srcIp.isInRange(ip("192.168.1.0/24")) &&
+  context.workdayStart <= context.now.timestamp &&
+  context.now.timestamp < context.workdayEnd
+};
+```
 
-- `year` must be between 1900 and 2100
-- `month` must be between 1 and 12
-- `day` must be between 1 and...
-  - 30 for `month`=4,6,9,11
-  - 31 for `month`=1,3,5,7,8,10,12
-  - 28 for `month`=2 if `year` is not divisible by 4
-  - 29 for `month`=2 if `year` is divisible by 4
-- `hours` must be between 0 and 23
-- `minutes` must be between 0 and 60
-- `seconds` must be between 0 and 60
+Note that the localized version of this example must adjust `workdayStart` and `workdayEnd`.
 
-For the functions `offset`, `since`, and `dayOfWeek` there are cases where we must account for leap years. We note that from the year 1900 to 2100, the leap year rule is simply "is the year divisible by 4?" For the `dayOfWeek` calculation, we can also make note that January 1, 1900 fell on a Monday. Practically speaking, we see no reason to support datetimes outside of the range of 1900 to 2100.
+**Prevent employees from accessing work documents on the weekend.**
+
+```cedar
+forbid(
+  principal,
+  action == Action::"access",
+  resource is Document
+) when {
+  [1, 7].context.now.dayOfWeek
+};
+```
+
+**Permit access to a special opportunity for persons born on Leap Day.**
+
+```
+permit(
+  principal,
+  action == Action::"redeem",
+  resource is Prize
+) when {
+  principal.birthDate.day == 29 &&
+  principal.birthDate.month == 2 &&
+  context.now.day == 29 && 
+  context.now.month == 2
+};
+```
+
+We must provide the `currentDate` as we can't truncate `currentTime` to eliminate the time component. 
+
+**Forbid access to EU resources after Brexit**
+
+```cedar
+forbid(
+  principal,
+  action,
+  resource
+) when {
+  context.now.timestamp > datetime("20200131T23:00:00Z") &&
+  context.location.countryOfOrigin == 'GB' &&
+  resource.owner == 'EU'
+}
+```
 
 ### Out of scope
 
 - **Conversion between UTC and epochs:** this will be particularly difficult to model and verify in Lean (although it's technically possible, see [this paper](https://dl.acm.org/doi/abs/10.1145/3636501.3636958) which does something similar in the Coq proof assistant). Since it will likely require input-dependent loops, it is unlikely that this can be reasoned about efficiently with SMT.
-- **Conversion between UTC and other Time Zones:** Time Zones are a notoriously complex system that evolves constantly. We avoid this complexity by offering `datetime.offset(duration).` Policy authors that require "local time" can use `context` to pass in a `duration` that shifts the current time appropriately.
-- **Leap Seconds:** Cedar does not have a clock, and this proposal does not add one. We aim only to provide arithmetic operations over instants of time, at second resolution. We recognize that without leap second support, functions such as `isBefore()` or `offset()` cannot be precise.
+
+- **Conversion between UTC and other Time Zones:** Time Zones are a notoriously complex system that evolves rapidly. We avoid this complexity by offering `datetime.add(duration).` Policy authors that require "local time" can either provide an additional datetime in `context` or provide a `duration` to the `context` and call `.add()` to shift the time.
+
+- **Leap Seconds:** Cedar does not have a clock, and this proposal does not add one. Instead, we pass Unix Time through `context` or an entity and let the system / application handle leap seconds.
 
 ### Support for date/time in other authorization systems
 
@@ -209,15 +283,11 @@ AWS IAM supports [date condition operators](https://docs.aws.amazon.com/IAM/late
 
 [Open Policy Agent](https://www.openpolicyagent.org) provides a [Time API](https://www.openpolicyagent.org/docs/latest/policy-reference/#time) with nanosecond precision and extensive time zone support. During policy evaluation, the current timestamp can be returned, and date/time arithmetic can be performed. The `diff` (equivalent to our proposed `since` function) returns an array of positional time unit components, instead of a value typed similarly to our proposed `duration`.
 
-## Drawbacks
-
-
-
 ## Alternatives
 
-### Alt. A: Use Unix time / timestamps / epochs
+### Alt. A: Represent Unix time with a Long
 
-One of our suggested workarounds for date/time functionality has been to use [Unix time](https://en.wikipedia.org/wiki/Unix_time), which measures the number of non-leap seconds that have elapsed since 00:00:00 UTC on January 1, 1970. Unix time is commonly used in computing systems, and there are many libraries available to convert between more familiar day formats and Unix time.
+This is, effectively, the do nothing alternative. Cedar has long suggested workarounds for date/time functionality by using the comparison and arithmetic operators with `context` provided Unix Timestamps.
 
 Here are the previous examples rewritten to use Unix Time.
 
@@ -291,7 +361,7 @@ forbid(
 
 ### Alt. B: Pass results of time checks in the context
 
-Another workaround we have suggested is to simply handle date/time logic _outside_ of Cedar, and pass the results of checks in the context. For example, you could pass in fields like  `context.isWorkingHours` or `context.dayOfTheWeek`.
+Another workaround we have suggested is to simply handle date/time logic _outside_ of Cedar, and pass the results of checks in the `context`. For example, you could pass in fields like  `context.isWorkingHours` or `context.dayOfTheWeek`.
 
 Here are the previous examples rewritten to use additional context.
 
@@ -374,104 +444,6 @@ forbid(
 }
 ```
 
-
-### Alt. C: Combine Unix Time with additional Pre-Computed context.
-
-The use of [Unix time](https://en.wikipedia.org/wiki/Unix_time), could be augmented with additional provided context, as in Alt. B.. To solve the readability problem of `context.now < 1723000000`, we could introduce `datetime(s)`, but instead return the Unix Time as a `long`.
-
-Here are the previous examples rewritten to use Unix Time with pre-computed context, and the modified `datetime`.
-
-**Only allow experienced, tenured persons from the Hardware Engineering department to see prototypes.**
-
-```cedar
-permit(
-  principal is User,
-  action == Action::"view",
-  resource in Folder::"device_prototypes"
-)
-when {
-  principal.department == "HardwareEngineering" &&
-  principal.jobLevel >= 10 &&
-  (context.currentTime - (365 * 24 * 60 * 60)) >= principal.hireDate
-};
-```
-
-_(this is unchanged from Alt. A.)_
-
-**Only allow user "alice" to view JPEG photos for one week after creation.**
-
-```cedar
-permit(
-  principal == User::"alice",
-  action == PhotoOp::"view",
-  resource is Photo
-) when {
-  resource.fileType == "JPEG" &&
-  resource.creationDate <= (context.currentTime - (7 * 24 * 60 * 60)) 
-};
-```
-
-_(this is unchanged from Alt. A.)_
-
-**Allow access from a certain IP address only between 9am and 6pm UTC.**
-
-```cedar
-permit(
-  principal,
-  action == Action::"access",
-  resource
-) when {
-  context.srcIp.isInRange(ip("192.168.1.0/24")) &&
-  context.workdayStart <= context.currentTime &&
-  context.currentTime < context.workdayEnd
-};
-```
-
-Note that the localized version of this example, must adjust `workdayStart` and `workdayEnd` as appropriate.
-
-**Prevent employees from accessing work documents on the weekend.**
-
-```cedar
-forbid(
-  principal,
-  action == Action::"access",
-  resource is Document
-) when {
-  context.isTheWeekend
-};
-```
-
-_(this is unchanged from Alt. B.)_
-
-**Permit access to a special opportunity for persons born on Leap Day.**
-
-```
-permit(
-  principal,
-  action == Action::"redeem",
-  resource is Prize
-) when {
-  context.currentDate == principal.birthDate && 
-  context.currentDate == datetime("202402029T00:00:00Z")
-};
-```
-
-We must provide the `currentDate` as we can't truncate `currentTime` to eliminate the time component. 
-
-**Forbid access to EU resources after Brexit**
-
-```cedar
-forbid(
-  principal,
-  action,
-  resource
-) when {
-  context.currentTime > datetime("20200131T23:00:00Z") &&
-  context.location.countryOfOrigin == 'GB' &&
-  resource.owner == 'EU'
-}
-```
-
 ## Potential extensions
 
 ### Ext. A: Provide a `currentTime` function
@@ -483,8 +455,4 @@ The examples above expect `currentTime` to be passed in the context during the a
 ### Should we consider local time at all?
 
 Writing programs that involve dates and time is tricky. Standardizing on UTC representations for all dates and times trades achieving evaluator correctness more quickly at the expense of decreased readability for policy authors and auditors.
-
-### Does second level granularity make sense?
-
-
 
